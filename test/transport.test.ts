@@ -3,11 +3,16 @@ import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
+import {
+  Client,
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/client";
+import { z } from "zod";
 import { WebSocketServer } from "ws";
 import { T3Client, ShellStream } from "../src/t3.js";
 import { Events } from "../src/events.js";
 import { Mcp, httpServer } from "../src/server.js";
-import { config, filter, send, setup, thread } from "./helpers.js";
+import { config, filter, send, setup, thread, secret } from "./helpers.js";
 
 test("T3 HTTP uses exact release routes, identity check precedes credentials, detail projects out private fields", async () => {
   const seen: Array<{ url: string; init?: RequestInit }> = [];
@@ -118,10 +123,26 @@ test("real loopback MCP enforces auth, advertises events, executes through appro
       method: "POST",
       headers: {
         "content-type": "application/json",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+        ...(method === "tools/call"
+          ? { "mcp-name": String((params as { name: string }).name) }
+          : {}),
         authorization: `Bearer ${auth}`,
         ...(origin ? { origin } : {}),
       },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method,
+        params: {
+          ...(params as object),
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
     });
   try {
     assert.equal((await call("tools/list", {}, "wrong")).status, 401);
@@ -250,6 +271,206 @@ test("real websocket fixture verifies Effect Request/Chunk/Ack and reconnect aft
     abort.abort();
     for (const ws of wss.clients) ws.terminate();
     await new Promise<void>((resolve) => wss.close(() => resolve()));
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+  }
+});
+
+test("official MCP v2 client negotiates modern discovery, calls tools and manages event callbacks", async () => {
+  const { bridge, store } = setup();
+  const events = new Events(bridge, async (_url, body) => {
+    const request = JSON.parse(body) as { challenge?: string };
+    return {
+      status: 200,
+      body: JSON.stringify({ challenge: request.challenge }),
+    };
+  });
+  const server = httpServer(
+    new Mcp(bridge, events, () => ({})),
+    "a".repeat(32),
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const client = new Client(
+    { name: "bridge-compatibility-test", version: "1" },
+    {
+      capabilities: {},
+      versionNegotiation: { mode: { pin: "2026-07-28" } },
+    },
+  );
+  const received: Array<Record<string, unknown>> = [];
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`),
+    {
+      requestInit: { headers: { authorization: `Bearer ${"a".repeat(32)}` } },
+      fetch: async (url, init) => {
+        const response = await fetch(url, init);
+        if (
+          response.headers.get("content-type")?.includes("application/json")
+        ) {
+          const rpc = (await response.clone().json()) as {
+            result?: Record<string, unknown>;
+          };
+          if (rpc.result) received.push(rpc.result);
+        }
+        return response;
+      },
+    },
+  );
+  try {
+    await client.connect(transport);
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((t) => t.name === "t3_read_thread"));
+    const read = await client.callTool({
+      name: "t3_read_thread",
+      arguments: filter,
+    });
+    assert.equal(read.isError, false);
+    const complete = z.object({}).passthrough();
+    const listed = await client.request(
+      { method: "events/list", params: {} },
+      complete.extend({ events: z.array(z.object({ name: z.string() })) }),
+    );
+    assert.equal(listed.events[0]?.name, "thread.changed");
+    const input = {
+      name: "thread.changed",
+      arguments: filter,
+      delivery: {
+        mode: "webhook",
+        url: "https://receiver.example.com/callback",
+        secret,
+      },
+    };
+    const subscription = await client.request(
+      { method: "events/subscribe", params: input },
+      complete.extend({ id: z.string() }),
+    );
+    assert.match(subscription.id, /^sub_/);
+    await client.request(
+      {
+        method: "events/unsubscribe",
+        params: {
+          ...input,
+          delivery: { mode: "webhook", url: input.delivery.url },
+        },
+      },
+      complete,
+    );
+    assert.equal(store.all("subscriptions").length, 0);
+    await client.callTool({ name: "t3_status", arguments: {} });
+    assert.ok(received.length >= 7);
+    assert.ok(received.every((r) => r.resultType === "complete"));
+    assert.ok(received[0]?._meta);
+    assert.equal(received[0]?.cacheScope, "private");
+  } finally {
+    await client.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    store.close();
+  }
+});
+
+test("modern MCP rejects missing metadata, mismatched headers, unsupported versions and legacy initialize", async () => {
+  const { bridge, store } = setup();
+  const server = httpServer(
+    new Mcp(
+      bridge,
+      new Events(bridge, async () => ({ status: 200, body: "{}" })),
+      () => ({}),
+    ),
+    "a".repeat(32),
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+  const meta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+  };
+  const call = async (
+    method: string,
+    params: object,
+    extra: Record<string, string> = {},
+  ) => {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${"a".repeat(32)}`,
+        "content-type": "application/json",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": method,
+        ...extra,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    return {
+      status: res.status,
+      body: (await res.json()) as {
+        error?: { code: number; data?: unknown };
+        result?: unknown;
+      },
+    };
+  };
+  try {
+    assert.equal((await call("tools/list", {})).status, 400);
+    assert.equal(
+      (
+        await call(
+          "tools/list",
+          { _meta: meta },
+          { "mcp-method": "tools/call" },
+        )
+      ).body.error?.code,
+      -32020,
+    );
+    assert.equal(
+      (
+        await call(
+          "tools/list",
+          { _meta: meta },
+          { "mcp-protocol-version": "2025-06-18" },
+        )
+      ).body.error?.code,
+      -32020,
+    );
+    assert.equal(
+      (
+        await call("tools/call", {
+          _meta: meta,
+          name: "t3_status",
+          arguments: {},
+        })
+      ).body.error?.code,
+      -32020,
+    );
+    const version = await call("tools/list", {
+      _meta: {
+        ...meta,
+        "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+      },
+    });
+    assert.equal(version.status, 400);
+    assert.deepEqual(version.body.error?.data, {
+      supported: ["2026-07-28"],
+      requested: "2099-01-01",
+    });
+    assert.equal(
+      (await call("initialize", { protocolVersion: "2025-06-18" })).body.error
+        ?.code,
+      -32022,
+    );
+    assert.equal((await call("unknown", { _meta: meta })).status, 404);
+    const encoded = `=?base64?${Buffer.from("t3_status").toString("base64")}?=`;
+    assert.equal(
+      (
+        await call(
+          "tools/call",
+          { _meta: meta, name: "t3_status", arguments: {} },
+          { "mcp-name": encoded },
+        )
+      ).status,
+      200,
+    );
+  } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.close();
   }

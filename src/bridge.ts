@@ -27,6 +27,7 @@ export interface Receipt {
   result?: { sequence: number };
 }
 export interface Mapping {
+  environmentId: string;
   taskId: string;
   runId: string;
   projectId: string;
@@ -152,6 +153,7 @@ export class Bridge {
       target: environment.baseUrl,
       model: project.model,
       runtimeMode: "approval-required",
+      interactionMode: "default",
     });
   }
   approve(raw: unknown, ttlMs = 300000): { hash: string; expiresAt: number } {
@@ -205,20 +207,34 @@ export class Bridge {
     if (receipt?.state === "accepted")
       return { commandId: c.commandId, ...receipt.result };
     if (!receipt) {
-      if (c.operation !== "create") {
-        const detail = await this.read({
-          environmentId: c.environmentId,
-          projectId: c.projectId,
-          threadId: c.threadId,
-        });
+      const approval = this.store.get<Approval>("approvals", key);
+      if (
+        !approval ||
+        approval.hash !== hash ||
+        approval.expiresAt <= Date.now()
+      )
+        throw new BridgeError("approval_required");
+    }
+    if (c.operation === "send" || (!receipt && c.operation === "interrupt")) {
+      const detail = await this.read({
+        environmentId: c.environmentId,
+        projectId: c.projectId,
+        threadId: c.threadId,
+      });
+      if (c.operation === "send") {
         if (
-          c.operation === "interrupt" &&
-          detail.thread.session?.activeTurnId !== c.turnId
+          detail.thread.runtimeMode !== "approval-required" ||
+          detail.thread.interactionMode !== "default" ||
+          digest(detail.thread.modelSelection ?? null) !== digest(project.model)
         )
-          throw new BridgeError("turn_not_active");
-        if (c.operation === "send" && detail.thread.session?.activeTurnId)
+          throw new BridgeError("thread_execution_policy_mismatch");
+        if (!receipt && detail.thread.session?.activeTurnId)
           throw new BridgeError("thread_busy");
+      } else if (detail.thread.session?.activeTurnId !== c.turnId) {
+        throw new BridgeError("turn_not_active");
       }
+    }
+    if (!receipt) {
       const createdAt = new Date().toISOString();
       const common = {
         commandId: `bridge-${digest([this.config.principal, c.environmentId, c.commandId])}`,
@@ -242,6 +258,7 @@ export class Bridge {
             ? {
                 ...common,
                 type: "thread.turn.start",
+                modelSelection: project.model,
                 message: {
                   messageId: `bridge-${digest([c.environmentId, c.commandId]).slice(0, 32)}`,
                   role: "user",
@@ -260,14 +277,19 @@ export class Bridge {
         this.store.set("receipts", key, receipt);
         this.store.delete("approvals", key);
         if (c.operation === "send")
-          this.store.set("mappings", digest([c.environmentId, c.threadId]), {
-            taskId: c.taskId,
-            runId: c.runId,
-            projectId: c.projectId,
-            threadId: c.threadId,
-            commandId: c.commandId,
-            messageId: `bridge-${digest([c.environmentId, c.commandId]).slice(0, 32)}`,
-          } satisfies Mapping);
+          this.store.set(
+            "mappings",
+            digest([c.environmentId, c.threadId, c.commandId]),
+            {
+              environmentId: c.environmentId,
+              taskId: c.taskId,
+              runId: c.runId,
+              projectId: c.projectId,
+              threadId: c.threadId,
+              commandId: c.commandId,
+              messageId: `bridge-${digest([c.environmentId, c.commandId]).slice(0, 32)}`,
+            } satisfies Mapping,
+          );
       });
     }
     // A lost response remains pending. Retrying sends exactly the same persisted
@@ -280,18 +302,13 @@ export class Bridge {
         result,
       });
       const mapping: Mapping = {
+        environmentId: c.environmentId,
         taskId: c.taskId,
         runId: c.runId,
         projectId: c.projectId,
         threadId: c.threadId,
         commandId: c.commandId,
       };
-      if (c.operation === "create")
-        this.store.set(
-          "mappings",
-          digest([c.environmentId, c.threadId]),
-          mapping,
-        );
       if (c.operation === "create")
         this.store.set(
           "created",
@@ -310,19 +327,42 @@ export class Bridge {
           : [];
     for (const thread of threads) {
       if (!this.allowed(env, thread.projectId, thread.id)) continue;
-      const key = digest([env, thread.id]),
-        mapping = this.store.get<Mapping>("mappings", key);
-      if (!mapping?.messageId || mapping.turnId || !thread.latestTurn) continue;
+      const pending = this.store
+        .all<Mapping>("mappings")
+        .filter(
+          ([, m]) =>
+            m.environmentId === env &&
+            m.threadId === thread.id &&
+            m.projectId === thread.projectId &&
+            m.messageId &&
+            !m.turnId,
+        );
+      if (!pending.length || !thread.latestTurn) continue;
       const detail = await this.read({
         environmentId: env,
         projectId: thread.projectId,
         threadId: thread.id,
+        turnLimit: 100,
       });
-      const message = detail.thread.messages.find(
-        (m) => m.id === mapping.messageId,
-      );
-      if (message?.turnId)
-        this.store.set("mappings", key, { ...mapping, turnId: message.turnId });
+      for (const [key, mapping] of pending) {
+        const message = detail.thread.messages.find(
+          (m) => m.id === mapping.messageId && m.role === "user",
+        );
+        if (!message?.turnId) continue;
+        this.store.transaction(() => {
+          const current = this.store.get<Mapping>("mappings", key);
+          // Another observation may already have resolved this exact command.
+          if (!current || current.turnId || digest(current) !== digest(mapping))
+            return;
+          const proven = { ...current, turnId: message.turnId! };
+          const turnKey = digest([env, thread.id, message.turnId]);
+          const existing = this.store.get<Mapping>("turnMappings", turnKey);
+          if (existing && existing.commandId !== current.commandId)
+            throw new BridgeError("turn_correlation_conflict");
+          this.store.set("mappings", key, proven);
+          this.store.set("turnMappings", turnKey, proven);
+        });
+      }
     }
     this.ingest(env, item);
   }
@@ -355,9 +395,10 @@ export class Bridge {
         // emits current state with recovered=true; it cannot recreate lost history.
         if (!changed || (oldCursor === undefined && recovered)) return;
         const n = (this.store.get<number>("meta", "eventSequence") ?? 0) + 1;
-        let m = this.store.get<Mapping>("mappings", key);
         const turnId = t.latestTurn?.turnId;
-        if (m?.turnId !== turnId) m = undefined;
+        const m = turnId
+          ? this.store.get<Mapping>("turnMappings", digest([env, t.id, turnId]))
+          : undefined;
         const event: Notice = {
           eventId: `evt_${digest([env, sequence, t.id])}`,
           name: "thread.changed",

@@ -6,7 +6,20 @@ export const id = z
   .max(200)
   .regex(/^[A-Za-z0-9_.:-]+$/);
 export const model = z
-  .object({ instanceId: id, model: z.string().min(1).max(200) })
+  .object({
+    instanceId: id,
+    model: z.string().min(1).max(200),
+    options: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1),
+            value: z.union([z.string().min(1), z.boolean()]),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
   .strict();
 const scope = { environmentId: id, projectId: id };
 const write = { ...scope, taskId: id, runId: id, commandId: id };
@@ -131,6 +144,10 @@ export const threadSchema = z
     id,
     projectId: id,
     title: z.string(),
+    // Optional for read compatibility; sends fail closed unless all are verified.
+    modelSelection: model.optional(),
+    runtimeMode: z.string().optional(),
+    interactionMode: z.string().optional(),
     updatedAt: z.string(),
     latestTurn: z
       .object({

@@ -24,6 +24,7 @@ const subscriptionSchema = identitySchema.extend({
 });
 export interface Subscription {
   id: string;
+  revision: number;
   owner: string;
   filter: Filter;
   url: string;
@@ -57,7 +58,11 @@ export class Events {
       arguments: input.arguments,
       delivery: { mode: "webhook", url: input.delivery.url },
     });
-    const previous = this.bridge.store.get<Subscription>("subscriptions", id);
+    // Reserve a generation before any network await. Unsubscribe and later
+    // refreshes invalidate this attempt even if verification finishes afterward.
+    const revision =
+      (this.bridge.store.get<number>("subscriptionRevisions", id) ?? 0) + 1;
+    this.bridge.store.set("subscriptionRevisions", id, revision);
     const key = digest([
       this.bridge.config.principal,
       input.delivery.url,
@@ -80,6 +85,9 @@ export class Events {
         this.verifying.delete(key);
       }
     }
+    if (this.bridge.store.get<number>("subscriptionRevisions", id) !== revision)
+      throw new BridgeError("subscription_superseded");
+    const previous = this.bridge.store.get<Subscription>("subscriptions", id);
     const latest = this.bridge.store.get<number>("meta", "eventSequence") ?? 0;
     const earliest = this.bridge.store.all<Notice>("events")[0]?.[1];
     const floor = earliest ? Number(earliest.cursor) - 1 : latest;
@@ -97,6 +105,7 @@ export class Events {
     const expiresAt = Date.now() + Math.min(input.ttlMs ?? 86400000, 86400000);
     const sub: Subscription = {
       id,
+      revision,
       owner: this.bridge.config.principal,
       filter: input.arguments,
       url: input.delivery.url,
@@ -110,7 +119,7 @@ export class Events {
         : {}),
     };
     this.bridge.store.set("subscriptions", id, sub);
-    void this.flush();
+    void this.flush().catch(() => console.error("callback_delivery_failed"));
     return {
       id,
       refreshBefore: new Date(expiresAt).toISOString(),
@@ -121,7 +130,15 @@ export class Events {
   unsubscribe(raw: unknown) {
     const input = identitySchema.parse(raw);
     this.bridge.scope(input.arguments);
-    this.bridge.store.delete("subscriptions", this.identity(input));
+    const id = this.identity(input);
+    this.bridge.store.transaction(() => {
+      this.bridge.store.set(
+        "subscriptionRevisions",
+        id,
+        (this.bridge.store.get<number>("subscriptionRevisions", id) ?? 0) + 1,
+      );
+      this.bridge.store.delete("subscriptions", id);
+    });
     return {};
   }
   flush(): Promise<void> {
@@ -161,6 +178,7 @@ export class Events {
         if (
           !current ||
           current.expiresAt <= Date.now() ||
+          current.revision !== sub.revision ||
           current.secret !== sub.secret
         )
           break;
@@ -199,6 +217,7 @@ export class Events {
         const after = this.bridge.store.get<Subscription>("subscriptions", id);
         if (
           !after ||
+          after.revision !== sub.revision ||
           after.secret !== sub.secret ||
           after.expiresAt !== sub.expiresAt
         )

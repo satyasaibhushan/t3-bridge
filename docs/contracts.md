@@ -8,6 +8,8 @@ T3 Code v0.0.45: commit `6c8fed35dded9ff71c5b46807125457acbb76be6`, orchestratio
 - [Protocol negotiation](https://github.com/pingdotgg/t3code/blob/6c8fed35dded9ff71c5b46807125457acbb76be6/packages/client-runtime/src/connection/compatibility.ts): `orchestrationProtocol=1`.
 - [RPC session](https://github.com/pingdotgg/t3code/blob/6c8fed35dded9ff71c5b46807125457acbb76be6/packages/client-runtime/src/rpc/session.ts): Effect JSON serialization.
 - [Effect frame definitions](https://unpkg.com/effect@4.0.0-rc.115/src/unstable/rpc/RpcMessage.ts): Request, Chunk, Ack, Ping/Pong and Exit. Only shell subscription is implemented.
+- [MCP versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning) and [HTTP binding](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http): modern request metadata, header validation and complete/cacheable result contracts. Compatibility test uses the official TypeScript client 2.3.1.
+- [T3 decider](https://github.com/pingdotgg/t3code/blob/6c8fed35dded9ff71c5b46807125457acbb76be6/apps/server/src/orchestration/decider.ts): turn requests inherit target thread runtime/interaction modes; command fields do not enforce these modes. Bridge validates current modes before sending but cannot make this atomic with upstream dispatch.
 - [MCP Events](https://developers.openai.com/plugins/build/mcp-events): protocol 2026-07-28, persistent subscriptions, verified signed callbacks, replay/refresh and retry behavior.
 
 No upstream code is vendored. Fixtures are synthetic contract examples. They verify routes and envelopes, not live platform access. The T3 socket uses Effect RPC; only the inbound MCP endpoint uses JSON-RPC.

@@ -10,6 +10,43 @@ import {
   readSchema,
 } from "./schema.js";
 import type { StreamHealth } from "./t3.js";
+export const protocolVersion = "2026-07-28";
+const metaSchema = z
+  .object({
+    "io.modelcontextprotocol/protocolVersion": z.string(),
+    "io.modelcontextprotocol/clientCapabilities": z.record(
+      z.string(),
+      z.unknown(),
+    ),
+    "io.modelcontextprotocol/clientInfo": z
+      .object({ name: z.string(), version: z.string() })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+class ProtocolError extends BridgeError {
+  constructor(
+    code: string,
+    rpcCode: number,
+    readonly data?: unknown,
+  ) {
+    super(code, rpcCode);
+  }
+}
+function headerValue(raw: string | string[] | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  if (raw.startsWith("=?base64?") && raw.endsWith("?=")) {
+    const encoded = raw.slice(9, -2);
+    const bytes = Buffer.from(encoded, "base64");
+    if (bytes.toString("base64") !== encoded) return undefined;
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return undefined;
+    }
+  }
+  return raw;
+}
 const rpcSchema = z
   .object({
     jsonrpc: z.literal("2.0"),
@@ -75,23 +112,34 @@ export class Mcp {
     readonly events: Events,
     readonly health: () => Record<string, StreamHealth>,
   ) {}
-  async call(method: string, params: unknown): Promise<unknown> {
+  async call(
+    method: string,
+    params: unknown,
+  ): Promise<Record<string, unknown>> {
+    return { ...(await this.dispatch(method, params)), resultType: "complete" };
+  }
+  private async dispatch(
+    method: string,
+    params: unknown,
+  ): Promise<Record<string, unknown>> {
     if (method === "server/discover")
       return {
         resultType: "complete",
-        supportedVersions: ["2026-07-28"],
-        serverInfo: { name: "t3-bridge", version: "0.1.0" },
+        supportedVersions: [protocolVersion],
+        ttlMs: 0,
+        cacheScope: "private",
+        _meta: {
+          "io.modelcontextprotocol/serverInfo": {
+            name: "t3-bridge",
+            version: "0.1.0",
+          },
+        },
         capabilities: { tools: {}, events: {} },
       };
-    if (method === "initialize")
-      return {
-        protocolVersion: "2025-06-18",
-        serverInfo: { name: "t3-bridge", version: "0.1.0" },
-        capabilities: { tools: {} },
-      };
-    if (method === "ping") return {};
     if (method === "tools/list")
       return {
+        ttlMs: 0,
+        cacheScope: "private",
         tools: [
           ...readTools,
           ...(this.bridge.config.enableWrites ? writes : []),
@@ -107,12 +155,13 @@ export class Mcp {
           },
         })),
       };
-    if (method === "events/list") return { events: [eventDefinition] };
+    if (method === "events/list")
+      return { events: [eventDefinition], ttlMs: 0, cacheScope: "private" };
     if (method === "events/subscribe") return this.events.subscribe(params);
     if (method === "events/unsubscribe") return this.events.unsubscribe(params);
     if (method === "tools/call") {
       const input = z
-        .object({ name: z.string(), arguments: z.unknown() })
+        .object({ name: z.string(), arguments: z.unknown().default({}) })
         .strict()
         .parse(params);
       let result: unknown;
@@ -210,13 +259,34 @@ export function httpServer(mcp: Mcp, token: string) {
       try {
         const rpc = rpcSchema.parse(await body(req));
         id = rpc.id ?? null;
-        if (rpc.id === undefined) {
-          if (rpc.method !== "notifications/initialized")
-            throw new BridgeError("notification_not_supported");
-          res.writeHead(202).end();
-          return;
-        }
-        const result = await mcp.call(rpc.method, rpc.params ?? {});
+        if (rpc.id === undefined)
+          throw new BridgeError("notification_not_supported", -32600);
+        const input = z.record(z.string(), z.unknown()).parse(rpc.params ?? {});
+        if (rpc.method === "initialize")
+          throw new ProtocolError("Unsupported protocol version", -32022, {
+            supported: [protocolVersion],
+            requested:
+              typeof input.protocolVersion === "string"
+                ? input.protocolVersion
+                : "legacy",
+          });
+        const { _meta, ...params } = input;
+        const meta = metaSchema.parse(_meta);
+        const requested = meta["io.modelcontextprotocol/protocolVersion"];
+        if (requested !== protocolVersion)
+          throw new ProtocolError("Unsupported protocol version", -32022, {
+            supported: [protocolVersion],
+            requested,
+          });
+        if (
+          req.headers["mcp-protocol-version"] !== requested ||
+          req.headers["mcp-method"] !== rpc.method ||
+          (rpc.method === "tools/call" &&
+            (typeof params.name !== "string" ||
+              headerValue(req.headers["mcp-name"]) !== params.name))
+        )
+          throw new ProtocolError("HeaderMismatch", -32020);
+        const result = await mcp.call(rpc.method, params);
         res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
       } catch (error) {
         const e =
@@ -228,6 +298,8 @@ export function httpServer(mcp: Mcp, token: string) {
                   : "internal_error",
                 error instanceof z.ZodError ? -32602 : -32603,
               );
+        res.statusCode =
+          e.rpcCode === -32601 ? 404 : e.rpcCode === -32603 ? 500 : 400;
         res.end(
           JSON.stringify({
             jsonrpc: "2.0",
@@ -235,7 +307,11 @@ export function httpServer(mcp: Mcp, token: string) {
             error: {
               code: e.rpcCode,
               message: e.code,
-              ...(e.rpcCode === -32015 ? { data: { reason: e.code } } : {}),
+              ...(e instanceof ProtocolError && e.data
+                ? { data: e.data }
+                : e.rpcCode === -32015
+                  ? { data: { reason: e.code } }
+                  : {}),
             },
           }),
         );

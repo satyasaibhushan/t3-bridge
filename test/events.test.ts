@@ -314,3 +314,40 @@ test("event filtering keeps other thread data out of callbacks", async () => {
     store.close();
   }
 });
+
+test("unsubscribe cancels a refresh waiting for callback verification, including after restart", async () => {
+  const { bridge, store } = setup();
+  const initial = new Events(bridge, callback().transport);
+  const sub = await initial.subscribe(input);
+  await initial.flush();
+  let release: () => void = () => {};
+  let notices = 0;
+  const waiting = new Events(bridge, async (_url, body) => {
+    const d = JSON.parse(body) as { type?: string; challenge?: string };
+    if (d.type !== "verification") notices++;
+    await new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { status: 200, body: JSON.stringify({ challenge: d.challenge }) };
+  });
+  try {
+    const pending = waiting.subscribe(input);
+    // A separate Events instance uses the same durable generation/tombstone.
+    initial.unsubscribe({
+      ...input,
+      delivery: { mode: "webhook", url: input.delivery.url },
+    });
+    release();
+    await assert.rejects(pending, /subscription_superseded/);
+    emit(bridge);
+    await waiting.flush();
+    assert.equal(store.get("subscriptions", sub.id), undefined);
+    assert.equal(notices, 0);
+    // A later deliberate subscribe is still allowed.
+    await initial.subscribe(input);
+    await initial.flush();
+    assert.ok(store.get("subscriptions", sub.id));
+  } finally {
+    store.close();
+  }
+});

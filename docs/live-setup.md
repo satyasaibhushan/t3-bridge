@@ -29,7 +29,7 @@ After pairing, perform read-only discovery to identify the user's selected test 
 1. Complete approved scoped pairing and configure exact environment/project/thread IDs. Verify read tools expose only that scope.
 2. Separately approve the authenticated HTTPS endpoint or private tunnel, dot plugin connection, inbound token and callback host.
 3. In dot: discover tools/events, subscribe, verify challenge, observe one allowed event, confirm the dot received and processed it, then unsubscribe. Confirm an unallowed thread produces no callback. A callback 2xx alone is insufficient evidence.
-4. For write testing, separately approve the operate scope, disposable thread and exact prompt/create/send/interrupt actions. Writes are disabled by default and require local command approvals. No real agent messages have been sent.
+4. For write testing, separately approve the operate scope, disposable thread and exact prompt/create/send/interrupt actions. Writes are disabled by default and require local command approvals. No real agent messages have been sent. Start with a fresh bridge-created disposable thread and no concurrent native policy edits: upstream cannot atomically enforce a preflight policy check.
 5. Task Finder follows dot acceptance and reuses `Bridge.execute` with stable task/run/command IDs. Do not add a second dispatcher, scheduler, task database or Backfill path.
 
 Report “connected” only after live tools and callback acceptance. Fixture tests establish implementation behavior, not access or integration permissions.

@@ -305,3 +305,138 @@ test("server cursor regression fails closed and deny-all configuration is valid"
     store.close();
   }
 });
+
+test("send rejects missing/changed effective runtime, interaction, provider and model after approval", async () => {
+  for (const changed of [
+    { runtimeMode: "full-access" },
+    { runtimeMode: undefined },
+    { interactionMode: "plan" },
+    { interactionMode: undefined },
+    { modelSelection: { instanceId: "other-provider", model: "test-model" } },
+    { modelSelection: { instanceId: "test-provider", model: "other-model" } },
+    { modelSelection: undefined },
+    {
+      modelSelection: {
+        ...thread.modelSelection!,
+        options: [{ id: "effort", value: "high" }],
+      },
+    },
+  ]) {
+    const { bridge, port, store } = setup();
+    try {
+      bridge.approve(send);
+      Object.assign(port.detail.thread, changed);
+      await assert.rejects(
+        bridge.execute(send),
+        /thread_execution_policy_mismatch/,
+      );
+      assert.equal(port.calls.length, 0);
+    } finally {
+      store.close();
+    }
+  }
+});
+
+test("pending send retries recheck execution policy and include the approved explicit model", async () => {
+  const { bridge, port, store } = setup();
+  try {
+    bridge.approve(send);
+    port.fail = true;
+    await assert.rejects(bridge.execute(send), /offline/);
+    assert.deepEqual(
+      (port.calls[0] as { modelSelection: unknown }).modelSelection,
+      thread.modelSelection,
+    );
+    port.detail.thread.runtimeMode = "full-access";
+    port.fail = false;
+    await assert.rejects(
+      bridge.execute(send),
+      /thread_execution_policy_mismatch/,
+    );
+    assert.equal(port.calls.length, 1);
+  } finally {
+    store.close();
+  }
+});
+
+test("overlapping sends and delayed observations retain every proven turn mapping across restart", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bridge-correlation-"));
+  const path = join(dir, "state.sqlite");
+  const { bridge, port, store } = setup(path);
+  let closed = false;
+  const second = { ...send, commandId: "cmd2", runId: "run2" };
+  try {
+    bridge.approve(send);
+    await bridge.execute(send);
+    const firstMessage = (port.calls[0] as { message: { messageId: string } })
+      .message.messageId;
+    let release: (value: typeof port.detail) => void = () => {};
+    const originalThread = port.thread.bind(port);
+    port.thread = () =>
+      new Promise((resolve) => {
+        release = resolve;
+      });
+    const delayed = bridge.observe("env", {
+      kind: "thread-upserted",
+      sequence: 1,
+      thread: {
+        ...thread,
+        latestTurn: { turnId: "turn1", state: "completed" },
+      },
+    });
+    port.thread = originalThread;
+    bridge.approve(second);
+    await bridge.execute(second);
+    const secondMessage = (port.calls[1] as { message: { messageId: string } })
+      .message.messageId;
+    const message = (id: string, turnId: string) => ({
+      id,
+      turnId,
+      role: "user",
+      text: "fixture",
+      createdAt: thread.updatedAt,
+    });
+    release({
+      snapshotSequence: 1,
+      thread: { ...thread, messages: [message(firstMessage, "turn1")] },
+    });
+    await delayed;
+    port.detail.thread.messages = [
+      message(firstMessage, "turn1"),
+      message(secondMessage, "turn2"),
+    ];
+    await bridge.observe("env", {
+      kind: "thread-upserted",
+      sequence: 2,
+      thread: { ...thread, latestTurn: { turnId: "turn2", state: "running" } },
+    });
+    assert.deepEqual(
+      store.all<Notice>("events").map(([, e]) => e.data.runId),
+      ["run", "run2"],
+    );
+    assert.equal(store.all("mappings").length, 2);
+    assert.equal(store.all("turnMappings").length, 2);
+    store.close();
+    closed = true;
+    const restarted = setup(path);
+    try {
+      restarted.bridge.ingest("env", {
+        kind: "thread-upserted",
+        sequence: 3,
+        thread: {
+          ...thread,
+          latestTurn: { turnId: "turn1", state: "completed" },
+        },
+      });
+      assert.equal(
+        restarted.store.all<Notice>("events").at(-1)?.[1].data.runId,
+        "run",
+      );
+    } finally {
+      restarted.store.close();
+    }
+  } finally {
+    if (!closed) store.close();
+    rmSync(dir, { recursive: true });
+  }
+});
