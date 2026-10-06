@@ -12,7 +12,9 @@ The app menu opens Settings. During inspection, HTML Connections navigation prod
 
 User approval covers a dedicated revocable `t3-bridge` pairing with **only `orchestration:read`**. No operate, terminal, review, relay, access-admin, tunnel, or dot credential grants are authorized by that approval.
 
-The release CLI `auth pairing create` hardcodes standard scopes including operate/terminal/review/relay. Do not use it for this approval. The supported least-scope HTTP flow is:
+The normal release UI supports the approved scope: **Settings → Connections → Authorized clients → Create link**, label `t3-bridge`, then select **Read only**. Confirm only **View environment** remains checked before creating the link. The preset sets exactly `[orchestration:read]`; its default **Standard** selection is broader. The Authorized clients section is rendered when the backend is already remotely reachable; do not change network exposure just to reveal it. This flow is verified in the [pinned UI source](https://github.com/pingdotgg/t3code/blob/6c8fed35dded9ff71c5b46807125457acbb76be6/apps/web/src/components/settings/ConnectionsSettings.tsx), not yet completed live.
+
+The release CLI `auth pairing create` hardcodes standard scopes including operate/terminal/review/relay. Do not use it for this approval. The equivalent supported least-scope HTTP flow is:
 
 1. Existing authorized owner context calls `POST /api/auth/pairing-token` with `{ "label": "t3-bridge", "scopes": ["orchestration:read"] }`.
 2. Intentional form-encoded `POST /oauth/token` exchanges the bootstrap credential, explicitly requesting `scope=orchestration:read` with the documented token-exchange grant/types.
