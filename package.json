@@ -1,0 +1,28 @@
+{
+  "name": "t3-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --outDir .test-build && node --test .test-build/test/*.test.js",
+    "lint": "prettier --check src test *.json",
+    "format": "prettier --write src test *.json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "zod": "^4.1.0",
+    "ws": "^8.18.0",
+    "ipaddr.js": "^2.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.0",
+    "prettier": "^3.6.0"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "port": 4317,
+  "statePath": "./state/bridge.sqlite",
+  "enableWrites": false,
+  "principal": "owner",
+  "clientTokenEnv": "T3_BRIDGE_CLIENT_TOKEN",
+  "callbackHosts": [],
+  "environments": []
+}
