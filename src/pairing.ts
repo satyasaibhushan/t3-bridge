@@ -15,7 +15,14 @@ import { z } from "zod";
 import { BridgeError, type Environment } from "./schema.js";
 import { T3Client } from "./t3.js";
 
-const scope = "orchestration:read";
+const scopes = {
+  readonly: "orchestration:read",
+  control: "orchestration:read orchestration:operate",
+} as const;
+export type PairingMode = keyof typeof scopes;
+function requestedScope(mode: PairingMode) {
+  return scopes[z.enum(["readonly", "control"]).parse(mode)];
+}
 const accessType = "urn:ietf:params:oauth:token-type:access_token";
 const tokenSchema = z
   .string()
@@ -26,7 +33,7 @@ const credentialSchema = z
   .object({
     environmentId: z.string(),
     baseUrl: z.string(),
-    scope: z.literal(scope),
+    scope: z.enum([scopes.readonly, scopes.control]),
     accessToken: tokenSchema,
     expiresAt: z.number().finite().positive(),
   })
@@ -49,11 +56,13 @@ function localTarget(environment: Environment) {
   )
     throw new BridgeError("pairing_requires_literal_loopback");
 }
-export async function exchangeReadOnly(
+export async function exchangePairing(
   environment: Environment,
   bootstrap: string,
   request: typeof fetch = fetch,
+  mode: PairingMode = "readonly",
 ): Promise<Credential> {
+  const scope = requestedScope(mode);
   localTarget(environment);
   // This is the supported intentional bootstrap exchange, never desktop auth.
   if (!tokenSchema.safeParse(bootstrap).success || bootstrap.includes("://"))
@@ -90,9 +99,16 @@ export async function exchangeReadOnly(
         issued_token_type: z.literal(accessType),
         token_type: z.literal("Bearer"),
         expires_in: z.number().finite().positive(),
-        scope: z.literal(scope),
+        scope: z.string(),
       })
       .parse(await response.json());
+    // OAuth scopes are a set; accept order differences, reject missing, extra
+    // or duplicate scopes rather than silently broadening or downscoping.
+    if (
+      result.scope.split(" ").sort().join(" ") !==
+      scope.split(" ").sort().join(" ")
+    )
+      throw new Error("unexpected_grant_scope");
     return credentialSchema.parse({
       environmentId: environment.id,
       baseUrl: environment.baseUrl,
@@ -171,23 +187,26 @@ export function loadCredential(environment: Environment): string {
     throw new BridgeError("credential_file_invalid_or_expired");
   }
 }
-export async function pairReadOnly(
+export async function pairEnvironment(
   environment: Environment,
   destination: string,
   terminal: PairingTerminal,
   request: typeof fetch = fetch,
+  mode: PairingMode = "readonly",
 ) {
+  const scope = requestedScope(mode);
+  const confirmation = mode === "control" ? "pair-control" : "pair";
   localTarget(environment);
   if (!isAbsolute(destination))
     throw new BridgeError("credential_path_must_be_absolute_without_symlinks");
   await new T3Client(environment, () => "", request).verifyIdentity();
   terminal.write(
-    `Verified ${environment.id} at ${environment.baseUrl}. This exchanges a user-created Read only pairing for t3-bridge, requesting only ${scope}. No agent task will run.\n`,
+    `Verified ${environment.id} at ${environment.baseUrl}. This exchanges a user-created pairing for t3-bridge, requesting exactly ${scope}. Bridge writes remain separately gated; no agent task will run.\n`,
   );
   if (
     (await terminal.read(
-      "Type pair to approve this exchange (anything else cancels): ",
-    )) !== "pair"
+      `Type ${confirmation} to approve this exact exchange (anything else cancels): `,
+    )) !== confirmation
   )
     throw new BridgeError("pairing_cancelled");
   let bootstrap = await terminal.read(
@@ -196,12 +215,12 @@ export async function pairReadOnly(
   );
   let credential: Credential;
   try {
-    credential = await exchangeReadOnly(environment, bootstrap, request);
+    credential = await exchangePairing(environment, bootstrap, request, mode);
   } finally {
     bootstrap = "";
   }
   terminal.write(
-    `Read-only bearer exchange succeeded. Save the credential to ${destination} in a private directory (0700), new file (0600). It is sensitive plaintext; existing files will not be overwritten.\n`,
+    `Bearer exchange for exactly ${scope} succeeded. Save the credential to ${destination} in a private directory (0700), new file (0600). It is sensitive plaintext; existing files will not be overwritten.\n`,
   );
   if (
     (await terminal.read(

@@ -25,13 +25,19 @@ The example denies all resources and disables writes. When authorized, copy it t
 node dist/main.js serve config.local.json
 ```
 
-After the user creates an approved **Read only** pairing in T3, they can run the helper themselves in an interactive terminal:
+After creating an approved pairing in T3, the user runs the matching helper in an interactive terminal. The read-only option remains available:
 
 ```sh
 node dist/main.js pair-readonly config.local.json VERIFIED_ENVIRONMENT_ID /absolute/private/directory/t3.credentials.json
 ```
 
-The helper verifies the configured literal loopback endpoint and environment, asks for exchange confirmation, reads the raw bootstrap credential with terminal echo disabled, and requests only `orchestration:read`. It rejects broader or proof-bound results. A separate `save` confirmation permits a new 0600 credential file in an owner-only 0700 directory; it never overwrites a file or edits configuration. Set that environment's `credentialFile` to the absolute path after saving. With this option, the file takes precedence over `tokenEnv`; target binding, expiry and permissions are checked on every use. Keep it outside the repository. The file is plaintext and requires private encrypted host storage. No raw credential is printed or accepted as a CLI argument. Do not run this helper through an agent: credential entry and submission belong to the user. See [live setup](docs/live-setup.md) for the exact owner controls and approval scope.
+For the separately approved read-and-control scope, start with T3's **Read only** preset, then check **Operate tasks**. Only **View environment** (`orchestration:read`) and **Operate tasks** (`orchestration:operate`) should remain checked. The **Standard** preset includes extra permissions and is unsuitable. Copy the new row's raw code using **Share → Copy code only** (or **Copy code** when shown), then run:
+
+```sh
+node dist/main.js pair-control config.local.json VERIFIED_ENVIRONMENT_ID /absolute/private/directory/t3.credentials.json
+```
+
+The helper verifies the configured literal loopback endpoint and environment, asks for the exact exchange confirmation (`pair` for read-only, `pair-control` for read plus operate), and reads the raw bootstrap credential with terminal echo disabled. The selected command requests exactly its named scope set. It rejects missing, extra, duplicate or proof-bound grants; it never upgrades scope automatically. A separate `save` confirmation permits a new 0600 credential file in an owner-only 0700 directory; it never overwrites a file or edits configuration. Set that environment's `credentialFile` to the absolute path after saving. With this option, the file takes precedence over `tokenEnv`; target binding, expiry and permissions are checked on every use. Keep it outside the repository. The file is plaintext and requires private encrypted host storage. No raw credential is printed or accepted as a CLI argument. Neither pairing mode enables bridge writes or starts a service. Do not run this helper through an agent: credential entry and submission belong to the user. See [live setup](docs/live-setup.md) for the exact owner controls and approval scope.
 
 If exchange fails after submission or saving is declined/fails, inspect T3 Authorized clients and revoke the dedicated pairing if it is unused. The helper never silently retries an uncertain exchange or performs revocation.
 

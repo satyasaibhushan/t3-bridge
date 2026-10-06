@@ -14,9 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  exchangeReadOnly,
+  exchangePairing,
   loadCredential,
-  pairReadOnly,
+  pairEnvironment,
   saveCredential,
   type Credential,
   type PairingTerminal,
@@ -72,7 +72,7 @@ function directory() {
 
 test("pairing requests only read scope through pinned token exchange after identity verification", async () => {
   const f = fixture();
-  const result = await exchangeReadOnly(environment, bootstrap, f.request);
+  const result = await exchangePairing(environment, bootstrap, f.request);
   assert.equal(result.accessToken, accessToken);
   assert.equal(f.calls.length, 2);
   assert.equal(f.calls[0]?.url.pathname, "/.well-known/t3/environment");
@@ -111,7 +111,7 @@ test("pairing fails before credential transmission for remote, redirected or wro
   ]) {
     const f = fixture();
     await assert.rejects(
-      exchangeReadOnly({ ...environment, baseUrl }, bootstrap, f.request),
+      exchangePairing({ ...environment, baseUrl }, bootstrap, f.request),
       /literal_loopback/,
     );
     assert.equal(f.calls.length, 0);
@@ -122,7 +122,7 @@ test("pairing fails before credential transmission for remote, redirected or wro
   ]) {
     const bodies: unknown[] = [];
     await assert.rejects(
-      exchangeReadOnly(environment, bootstrap, async (_url, init) => {
+      exchangePairing(environment, bootstrap, async (_url, init) => {
         bodies.push(init?.body);
         return Response.json(descriptor);
       }),
@@ -131,7 +131,7 @@ test("pairing fails before credential transmission for remote, redirected or wro
   }
   let calls = 0;
   await assert.rejects(
-    exchangeReadOnly(environment, bootstrap, async (_url, init) => {
+    exchangePairing(environment, bootstrap, async (_url, init) => {
       calls++;
       assert.equal(init?.redirect, "error");
       return new Response(null, {
@@ -152,7 +152,7 @@ test("pairing rejects overbroad, proof-bound, expired and malformed responses wi
     { issued_token_type: "unknown" },
   ]) {
     await assert.rejects(
-      exchangeReadOnly(environment, bootstrap, fixture(result).request),
+      exchangePairing(environment, bootstrap, fixture(result).request),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /response_rejected/);
@@ -169,7 +169,7 @@ test("interactive pairing requires explicit exchange consent, hidden entry, sepa
   const f = fixture(),
     t = terminal(["pair", bootstrap, "save"]);
   try {
-    await pairReadOnly(environment, path, t.io, f.request);
+    await pairEnvironment(environment, path, t.io, f.request);
     assert.equal(t.prompts[1]?.secret, true);
     assert.equal(t.prompts.length, 3);
     assert.equal(statSync(path).mode & 0o777, 0o600);
@@ -200,13 +200,13 @@ test("declining pairing or storage performs no unapproved write", async () => {
   try {
     const no = fixture();
     await assert.rejects(
-      pairReadOnly(environment, path, terminal(["no"]).io, no.request),
+      pairEnvironment(environment, path, terminal(["no"]).io, no.request),
       /cancelled/,
     );
     assert.equal(no.calls.length, 1);
     assert.equal(existsSync(path), false);
     const discard = terminal(["pair", bootstrap, "no"]);
-    await pairReadOnly(environment, path, discard.io, fixture().request);
+    await pairEnvironment(environment, path, discard.io, fixture().request);
     assert.equal(existsSync(join(dir, "new")), false);
     assert.match(discard.output.join(""), /Revoke/);
   } finally {
@@ -253,6 +253,108 @@ test("credential files enforce permissions, target binding, expiry, no symlinks 
       () => loadCredential({ ...environment, credentialFile: path }),
       /invalid_or_expired/,
     );
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("control pairing requests exactly read plus operate and accepts only that scope set", async () => {
+  const wanted = "orchestration:read orchestration:operate";
+  for (const scope of [wanted, "orchestration:operate orchestration:read"]) {
+    const f = fixture({ scope });
+    const c = await exchangePairing(
+      environment,
+      bootstrap,
+      f.request,
+      "control",
+    );
+    assert.equal(c.scope, wanted);
+    const form = new URLSearchParams(String(f.calls[1]?.init?.body));
+    assert.equal(form.get("scope"), wanted);
+  }
+  for (const scope of [
+    "orchestration:read",
+    "orchestration:operate",
+    "",
+    wanted + " terminal:operate",
+    wanted + " access:read",
+    wanted + " access:write",
+    wanted + " review:write",
+    wanted + " relay:read",
+    wanted + " relay:write",
+    wanted + " orchestration:operate",
+  ])
+    await assert.rejects(
+      exchangePairing(
+        environment,
+        bootstrap,
+        fixture({ scope }).request,
+        "control",
+      ),
+      /response_rejected/,
+    );
+});
+test("control pairing requires its explicit local confirmation and separate private-save consent", async () => {
+  const dir = directory(),
+    path = join(dir, "t3.credentials.json");
+  const scope = "orchestration:read orchestration:operate";
+  try {
+    const no = fixture({ scope });
+    await assert.rejects(
+      pairEnvironment(
+        environment,
+        path,
+        terminal(["pair"]).io,
+        no.request,
+        "control",
+      ),
+      /cancelled/,
+    );
+    assert.equal(no.calls.length, 1);
+    const t = terminal(["pair-control", bootstrap, "save"]);
+    await pairEnvironment(
+      environment,
+      path,
+      t.io,
+      fixture({ scope }).request,
+      "control",
+    );
+    assert.match(t.prompts[0]?.prompt ?? "", /Type pair-control/);
+    assert.equal(t.prompts[1]?.secret, true);
+    assert.match(t.prompts[2]?.prompt ?? "", /Type save/);
+    assert.match(
+      t.output[0] ?? "",
+      /exactly orchestration:read orchestration:operate/,
+    );
+    assert.equal(JSON.parse(readFileSync(path, "utf8")).scope, scope);
+    assert.equal(
+      loadCredential({ ...environment, credentialFile: path }),
+      accessToken,
+    );
+    assert.ok(!t.output.join("").includes(accessToken));
+    assert.ok(!t.output.join("").includes(bootstrap));
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+test("unknown pairing mode fails before network and control token does not change write configuration", async () => {
+  const f = fixture();
+  await assert.rejects(
+    exchangePairing(environment, bootstrap, f.request, "standard" as "control"),
+  );
+  assert.equal(f.calls.length, 0);
+  const dir = directory(),
+    path = join(dir, "t3.credentials.json");
+  const configBefore = JSON.stringify(config);
+  try {
+    await pairEnvironment(
+      environment,
+      path,
+      terminal(["pair-control", bootstrap, "save"]).io,
+      fixture({ scope: "orchestration:read orchestration:operate" }).request,
+      "control",
+    );
+    assert.equal(JSON.stringify(config), configBefore);
   } finally {
     rmSync(dir, { recursive: true });
   }

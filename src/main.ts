@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { loadCredential, localTerminal, pairReadOnly } from "./pairing.js";
+import { loadCredential, localTerminal, pairEnvironment } from "./pairing.js";
 import { Bridge } from "./bridge.js";
 import { httpsTransport } from "./callback.js";
 import { Events } from "./events.js";
@@ -13,10 +13,12 @@ async function main() {
     process.argv.slice(2);
   if (
     !configPath ||
-    !["serve", "approve", "check", "pair-readonly"].includes(action ?? "")
+    !["serve", "approve", "check", "pair-readonly", "pair-control"].includes(
+      action ?? "",
+    )
   )
     throw new BridgeError(
-      "usage: serve|approve|check CONFIG [COMMAND_FILE]; pair-readonly CONFIG ENVIRONMENT_ID CREDENTIAL_FILE",
+      "usage: serve|approve|check CONFIG [COMMAND_FILE]; pair-readonly|pair-control CONFIG ENVIRONMENT_ID CREDENTIAL_FILE",
     );
   const config = configSchema.parse(
     JSON.parse(readFileSync(configPath, "utf8")),
@@ -25,13 +27,19 @@ async function main() {
     console.log("Configuration valid; no connection attempted");
     return;
   }
-  if (action === "pair-readonly") {
+  if (action === "pair-readonly" || action === "pair-control") {
     if (!process.stdin.isTTY || !process.stdout.isTTY)
       throw new BridgeError("pairing_requires_interactive_terminal");
     const environment = config.environments.find((e) => e.id === commandPath);
     if (!environment || !credentialPath)
       throw new BridgeError("pairing_target_and_destination_required");
-    await pairReadOnly(environment, credentialPath, localTerminal);
+    await pairEnvironment(
+      environment,
+      credentialPath,
+      localTerminal,
+      fetch,
+      action === "pair-control" ? "control" : "readonly",
+    );
     return;
   }
   const store = new Store(config.statePath);
