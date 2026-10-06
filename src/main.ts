@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { loadCredential, localTerminal, pairReadOnly } from "./pairing.js";
 import { Bridge } from "./bridge.js";
 import { httpsTransport } from "./callback.js";
 import { Events } from "./events.js";
@@ -8,9 +9,15 @@ import { Store } from "./store.js";
 import { ShellStream, T3Client } from "./t3.js";
 
 async function main() {
-  const [action, configPath, commandPath] = process.argv.slice(2);
-  if (!configPath || !["serve", "approve", "check"].includes(action ?? ""))
-    throw new BridgeError("usage: serve|approve|check CONFIG [COMMAND_FILE]");
+  const [action, configPath, commandPath, credentialPath] =
+    process.argv.slice(2);
+  if (
+    !configPath ||
+    !["serve", "approve", "check", "pair-readonly"].includes(action ?? "")
+  )
+    throw new BridgeError(
+      "usage: serve|approve|check CONFIG [COMMAND_FILE]; pair-readonly CONFIG ENVIRONMENT_ID CREDENTIAL_FILE",
+    );
   const config = configSchema.parse(
     JSON.parse(readFileSync(configPath, "utf8")),
   );
@@ -18,11 +25,20 @@ async function main() {
     console.log("Configuration valid; no connection attempted");
     return;
   }
+  if (action === "pair-readonly") {
+    if (!process.stdin.isTTY || !process.stdout.isTTY)
+      throw new BridgeError("pairing_requires_interactive_terminal");
+    const environment = config.environments.find((e) => e.id === commandPath);
+    if (!environment || !credentialPath)
+      throw new BridgeError("pairing_target_and_destination_required");
+    await pairReadOnly(environment, credentialPath, localTerminal);
+    return;
+  }
   const store = new Store(config.statePath);
   const clients = new Map(
     config.environments.map((e) => [
       e.id,
-      new T3Client(e, () => process.env[e.tokenEnv] ?? ""),
+      new T3Client(e, () => loadCredential(e)),
     ]),
   );
   const bridge = new Bridge(config, store, clients);
@@ -37,7 +53,7 @@ async function main() {
     return;
   }
   for (const e of config.environments)
-    if (!process.env[e.tokenEnv]) throw new BridgeError("pairing_required");
+    if (!loadCredential(e)) throw new BridgeError("pairing_required");
   const events = new Events(bridge, httpsTransport(config.callbackHosts));
   bridge.onEvent = () => {
     void events.flush().catch(() => console.error("callback_delivery_failed"));

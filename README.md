@@ -19,11 +19,21 @@ node dist/main.js check config.example.json
 
 Tests use synthetic credentials and temporary loopback fixture servers, never the installed T3 app or a real callback service.
 
-The example denies all resources and disables writes. When authorized, copy it to `config.local.json`, configure exact discovered IDs, and supply dedicated credentials using the named environment variables. The inbound client token requires at least 32 characters. Never put tokens in config, command files, Git, logs, or chat.
+The example denies all resources and disables writes. When authorized, copy it to `config.local.json`, configure exact discovered IDs, and supply dedicated credentials using the named environment variables or an explicitly configured private `credentialFile` produced by the local helper. The inbound client token requires at least 32 characters. Never put tokens in config, command files, Git, logs, or chat.
 
 ```sh
 node dist/main.js serve config.local.json
 ```
+
+After the user creates an approved **Read only** pairing in T3, they can run the helper themselves in an interactive terminal:
+
+```sh
+node dist/main.js pair-readonly config.local.json VERIFIED_ENVIRONMENT_ID /absolute/private/directory/t3.credentials.json
+```
+
+The helper verifies the configured literal loopback endpoint and environment, asks for exchange confirmation, reads the raw bootstrap credential with terminal echo disabled, and requests only `orchestration:read`. It rejects broader or proof-bound results. A separate `save` confirmation permits a new 0600 credential file in an owner-only 0700 directory; it never overwrites a file or edits configuration. Set that environment's `credentialFile` to the absolute path after saving. With this option, the file takes precedence over `tokenEnv`; target binding, expiry and permissions are checked on every use. Keep it outside the repository. The file is plaintext and requires private encrypted host storage. No raw credential is printed or accepted as a CLI argument. Do not run this helper through an agent: credential entry and submission belong to the user. See [live setup](docs/live-setup.md) for the exact owner controls and approval scope.
+
+If exchange fails after submission or saving is declined/fails, inspect T3 Authorized clients and revoke the dedicated pairing if it is unused. The helper never silently retries an uncertain exchange or performs revocation.
 
 The MCP endpoint binds **127.0.0.1 only**, at `/mcp`. All requests require bearer authentication; browser Origin requests are rejected. Remote access requires a separately approved authenticated HTTPS endpoint or private tunnel. The service creates neither.
 

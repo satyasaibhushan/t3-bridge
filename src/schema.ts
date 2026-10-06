@@ -73,6 +73,7 @@ export const configSchema = z
             id,
             baseUrl: z.string().url(),
             tokenEnv: id,
+            credentialFile: z.string().min(1).optional(),
             projects: z
               .array(
                 z

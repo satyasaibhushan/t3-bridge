@@ -5,3 +5,5 @@ dist/
 config.local.json
 approvals.local.json
 .test-build/
+
+*.credentials.json

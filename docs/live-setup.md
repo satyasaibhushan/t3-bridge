@@ -22,6 +22,8 @@ The release CLI `auth pairing create` hardcodes standard scopes including operat
 
 This requires supported owner access. Do not borrow internal credentials, scrape provider sessions, or create a broader pairing and treat a wrapper allowlist as equivalent. Hand off user credential entry/submission when required. Never paste credentials into chat or retain them as evidence.
 
+The CLI now includes `pair-readonly CONFIG ENVIRONMENT_ID /absolute/private/directory/t3.credentials.json`. The user must run it in an interactive terminal and enter/submit the raw credential there. It checks literal loopback identity, requests only read scope, disables input echo, and asks separately before storing a new private file. It neither creates the bootstrap grant nor changes configuration, network access or provider settings. Synthetic tests cover the helper; no live exchange has been performed.
+
 After pairing, perform read-only discovery to identify the user's selected test project/thread. No project/thread identity has been invented or allowlisted. The example denies everything. Creating a missing disposable test project/thread requires approval for that exact mutation.
 
 ## Remaining acceptance
